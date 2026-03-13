@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+google-genai
+akshare
+duckdb
+pandas
+pandas-ta
+pydantic
+python-dotenv

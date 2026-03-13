@@ -1,0 +1,6 @@
+server:
+  port: 8080
+
+nl2quant:
+  python-engine:
+    url: http://localhost:8000
