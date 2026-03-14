@@ -12,7 +12,7 @@
           <condition-tree v-if="conditions.length" :conditions="conditions" @execute="handleExecute" />
           <el-empty v-else description="输入您的选股灵感，让AI帮您生成策略" />
           <el-divider v-if="conditions.length" />
-          <quant-chart v-if="showChart" />
+          <quant-chart v-if="showChart" :table-data="executionResults" />
         </el-main>
       </el-container>
     </el-container>
@@ -28,6 +28,7 @@ import QuantChart from './components/QuantChart.vue'
 const conditions = ref<any[]>([])
 const showChart = ref(false)
 const generatedCode = ref('')
+const executionResults = ref<any[]>([])
 
 const handleConditionsUpdate = (newConditions: any[], code: string | null) => {
   conditions.value = newConditions
@@ -49,6 +50,7 @@ const handleExecute = async () => {
      });
      const data = await res.json()
      if (res.ok) {
+       executionResults.value = data.data || []
        showChart.value = true
      } else {
        alert("执行失败: " + JSON.stringify(data))

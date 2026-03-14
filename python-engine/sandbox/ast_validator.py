@@ -6,13 +6,15 @@ ALLOWED_NODES = (
     ast.Call, ast.Attribute, ast.Constant, ast.List, ast.Dict, ast.Tuple,
     ast.BinOp, ast.Compare, ast.BoolOp, ast.UnaryOp, ast.Subscript, ast.Slice,
     ast.keyword, ast.Index, ast.ExtSlice, ast.Import, ast.ImportFrom, ast.alias,
+    # Allow control flow for LLM generated code
+    ast.If, ast.For, ast.Pass, ast.Lambda, ast.arguments, ast.arg,
     # Allow some math ops
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Lt, ast.Gt, ast.Eq, ast.NotEq,
-    ast.LtE, ast.GtE, ast.And, ast.Or, ast.Not
+    ast.LtE, ast.GtE, ast.And, ast.Or, ast.Not, ast.BitAnd, ast.BitOr, ast.Invert
 )
 
 ALLOWED_NAMES = {
-    'pd', 'pandas', 'np', 'numpy', 'ta', 'duckdb', 'print', 'len', 'range', 'int', 'float'
+    'pd', 'pandas', 'np', 'numpy', 'ta', 'duckdb', 'print', 'len', 'range', 'int', 'float', 'getattr', 'macros', 'functools', 'llm_agent.quant_macros'
 }
 
 class SecurityVisitor(ast.NodeVisitor):
@@ -31,13 +33,14 @@ class SecurityVisitor(ast.NodeVisitor):
 
     def visit_Import(self, node):
         for alias in node.names:
-            if alias.name not in ALLOWED_NAMES:
+            if alias.name.split('.')[0] not in ALLOWED_NAMES and alias.name not in ALLOWED_NAMES:
                 raise ValueError(f"Forbidden import: {alias.name}")
         super().generic_visit(node)
         
     def visit_ImportFrom(self, node):
-        if node.module not in ALLOWED_NAMES:
-             raise ValueError(f"Forbidden import from: {node.module}")
+        if node.module:
+            if node.module.split('.')[0] not in ALLOWED_NAMES and node.module not in ALLOWED_NAMES:
+                 raise ValueError(f"Forbidden import from: {node.module}")
         super().generic_visit(node)
 
 def validate_code(code: str) -> bool:

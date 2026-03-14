@@ -48,7 +48,7 @@ def get_duckdb_conn():
     conn = duckdb.connect()
     if glob.glob(f"{FACT_KLINE_DIR}/year=*/data.parquet"):
         try:
-            conn.execute(f"CREATE OR REPLACE VIEW v_fact_kline AS SELECT * FROM read_parquet('{FACT_KLINE_DIR}/year=*/data.parquet', hive_partitioning=true);")
+            conn.execute(f"CREATE OR REPLACE VIEW v_fact_kline AS SELECT * FROM read_parquet('{FACT_KLINE_DIR}/year=*/data.parquet', hive_partitioning=true, union_by_name=true);")
         except Exception as e:
             logger.warning(f"Failed to create view: {e}")
     return conn
