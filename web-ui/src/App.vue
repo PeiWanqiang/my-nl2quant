@@ -98,6 +98,7 @@ const clearResults = () => {
 }
 
 const handleExecute = async () => {
+  if (isExecuting.value) return
   if (conditions.value.length === 0) {
      ElMessage.warning("请先添加策略条件")
      return

@@ -1,29 +1,64 @@
 <template>
-  <el-card class="condition-card">
+  <el-card class="condition-card" shadow="hover">
     <template #header>
       <div class="card-header">
-        <span>策略微调面板 (白盒)</span>
-        <el-button type="success" @click="$emit('execute')">执行沙盒测试</el-button>
+        <span class="panel-title">🎯 策略微调面板 (白盒)</span>
+        <el-button type="success" :loading="executing" @click="$emit('execute')">执行沙盒测试</el-button>
       </div>
     </template>
     
-    <div v-for="cond in conditions" :key="cond.id" class="condition-item">
-      <h4>{{ cond.name }}</h4>
-      <p class="desc">{{ cond.description }}</p>
-      
-      <el-form label-width="120px" class="param-form">
-        <el-form-item v-for="(param, key) in cond.parameters" :key="key" :label="key.toString()">
-          <el-slider 
-            v-if="param.type === 'int' || param.type === 'float'" 
-            v-model="param.value" 
-            :min="param.min || 0" 
-            :max="param.max || 100"
-            :step="param.type === 'float' ? 0.1 : 1"
-            show-input
-          />
-        </el-form-item>
-      </el-form>
-      <el-divider />
+    <div class="conditions-container">
+      <el-card 
+        v-for="cond in conditions" 
+        :key="cond.id" 
+        class="condition-item"
+        shadow="never"
+      >
+        <div class="condition-header">
+          <h4>{{ cond.name }}</h4>
+          <el-button 
+            type="danger" 
+            text 
+            @click="$emit('delete', cond.id)"
+            title="删除此条件"
+          >
+            🗑️ 删除
+          </el-button>
+        </div>
+        <p class="desc">{{ cond.description }}</p>
+        
+        <div class="param-list">
+          <div v-for="(param, key) in cond.parameters" :key="key" class="param-inline">
+            <span class="param-label">{{ key }}</span>
+            <el-input-number 
+              v-if="param.type === 'int'" 
+              v-model="param.value" 
+              :min="param.min || 0" 
+              :max="param.max || 1000"
+              size="small"
+              class="inline-input"
+              @change="$emit('update', cond)"
+            />
+            <el-input-number 
+              v-else-if="param.type === 'float'" 
+              v-model="param.value" 
+              :min="param.min || 0" 
+              :max="param.max || 1000"
+              :step="0.1"
+              size="small"
+              class="inline-input"
+              @change="$emit('update', cond)"
+            />
+            <el-input 
+              v-else 
+              v-model="param.value" 
+              size="small"
+              class="inline-input"
+              @change="$emit('update', cond)"
+            />
+          </div>
+        </div>
+      </el-card>
     </div>
   </el-card>
 </template>
@@ -31,25 +66,71 @@
 <script setup lang="ts">
 defineProps<{
   conditions: any[]
+  executing?: boolean
 }>()
-defineEmits(['execute'])
+defineEmits(['execute', 'delete', 'update'])
 </script>
 
 <style scoped>
+.condition-card {
+  margin-bottom: 20px;
+  border-radius: 8px;
+}
 .card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
+.panel-title {
+  font-weight: 600;
+  font-size: 16px;
+}
+.conditions-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
 .condition-item {
-  margin-bottom: 20px;
+  background-color: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+}
+.condition-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.condition-header h4 {
+  margin: 0;
+  color: var(--el-text-color-primary);
+  font-size: 15px;
 }
 .desc {
-  color: #909399;
-  font-size: 14px;
-  margin-bottom: 10px;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  margin-bottom: 12px;
+  margin-top: 0;
 }
-.param-form {
-  padding-left: 20px;
+.param-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.param-inline {
+  display: flex;
+  align-items: center;
+  background-color: var(--el-bg-color);
+  padding: 4px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--el-border-color);
+}
+.param-label {
+  margin-right: 8px;
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+}
+.inline-input {
+  width: 120px;
 }
 </style>

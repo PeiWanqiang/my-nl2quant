@@ -77,12 +77,23 @@ def _generate_json(prompt: str) -> dict:
                 "items": {
                     "type": "OBJECT",
                     "properties": {
-                        "id": {"type": "STRING"},
-                        "name": {"type": "STRING"},
-                        "description": {"type": "STRING"},
+                        "id": {"type": "STRING", "description": "Unique ID for this condition"},
+                        "name": {"type": "STRING", "description": "Human readable name"},
+                        "description": {"type": "STRING", "description": "Detailed description"},
                         "parameters": {
-                            "type": "OBJECT",
-                            "description": "Key is parameter name, value is the parameter object. e.g. {'N_days': {'value': 5, 'type': 'int'}}",
+                            "type": "ARRAY",
+                            "description": "List of parameters. IMPORTANT: If using a macro (e.g., macro_37), extract its arguments (n, m, short, long, etc.) as parameters with default values and ranges.",
+                            "items": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "name": {"type": "STRING", "description": "Parameter name (e.g., 'n', 'm', 'threshold')"},
+                                    "value": {"type": "NUMBER", "description": "Extracted default value"},
+                                    "type": {"type": "STRING", "description": "'int' or 'float'"},
+                                    "min": {"type": "NUMBER", "description": "Minimum allowed value"},
+                                    "max": {"type": "NUMBER", "description": "Maximum allowed value"}
+                                },
+                                "required": ["name", "value", "type"]
+                            }
                         }
                     },
                     "required": ["id", "name", "description", "parameters"]
@@ -149,8 +160,19 @@ def negotiate_conditions(user_input: str, current_conditions: list) -> QuantChat
         conds = []
         for c in raw_json.get("extracted_conditions", []):
             params = {}
-            for k, v in c.get("parameters", {}).items():
-                params[k] = ConditionParameter(**v)
+            # Handle both array format (new) and dict format (legacy)
+            raw_params = c.get("parameters", {})
+            if isinstance(raw_params, list):
+                for p in raw_params:
+                    params[p["name"]] = ConditionParameter(
+                        value=p.get("value"),
+                        type=p.get("type", "int"),
+                        min=p.get("min"),
+                        max=p.get("max")
+                    )
+            else:
+                for k, v in raw_params.items():
+                    params[k] = ConditionParameter(**v)
             conds.append(ExtractedCondition(
                 id=c["id"],
                 name=c["name"],
