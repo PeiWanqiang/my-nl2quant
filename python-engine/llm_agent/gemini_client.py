@@ -12,40 +12,52 @@ load_dotenv()
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 # 使用 Gemini 2.5 Flash 或 Pro 来保证结构化输出的稳定性，由于我们是测试所以用 2.5-flash 会很快
+# =========================================================================
+# System Definitions
+# =========================================================================
+
+# 动态加载宏函数库
+import inspect
+import llm_agent.quant_macros as macros
+macro_funcs = [name for name, f in inspect.getmembers(macros, inspect.isfunction) if name.startswith('macro_')]
+
 MODEL_NAME = 'gemini-2.5-flash'
 
-NEGOTIATE_PROMPT = """
+NEGOTIATE_PROMPT = f"""
 你是一个名为 NL2Quant 的专业量化策略分析师。你的目标是理解用户的自然语言选股意图，并将其转化为结构化的、可量化的技术或基本面条件。
 系统将这些条件在前端渲染为带有滑动条的白盒界面，供用户微调。
 
 当用户提出新的选股需求，或者在已有条件上进行补充时：
 1. 深入理解用户的金融意图。
-2. 将意图拆解为一个个独立的 `ExtractedCondition` 对象。
-3. 对于每个条件，如果包含可变量化的参数（如“N日”、“M倍”、“大于某个阈值”），提取出来放到 `parameters` 中，并给出合理的默认值、类型、最小值和最大值。注意 type 只能是 'int', 'float', 'str'。
-4. 如果用户的意图非常模糊，或者你认为需要进一步确认参数，将 `interaction_state` 设置为 "CLARIFYING"，并在 `ai_message` 中礼貌地解释你的理解，并提示用户可以在界面上微调参数。
-5. 如果用户明确表示确认、没问题、直接执行等，将 `interaction_state` 设置为 "CONFIRMED"。
+2. 意图拆解与路由：
+   - 【标准解析】：对于明确的比较运算（如“市盈率小于30”、“今日涨跌幅大于5%”），提取为具体条件，参数中包含具体的阈值。
+   - 【黑话路由 (Known Jargon)】：系统内置了 50 个极其稳定的算法宏。你必须**尽可能将用户的自然语言映射到这些宏上**。
+     如果用户的意图匹配以下某个宏，必须将该条件设为黑话算子，在 JSON 中记录。可用的宏列表：
+     {macro_funcs}
+   - 【未知拦截 (Unknown Jargon)】：遇到无法用数学表达式或现有宏定义的极其主观的词汇（如“主力洗盘”、“庄家吸筹”、“龙头股”），必须阻断生成。将 `interaction_state` 设置为 "CLARIFYING"，并在 `ai_message` 中抛出提问，要求用户给出具体的量化指标（如换手率、振幅）。
+3. 对于每个条件，如果包含可变量化的参数（如“N日”、“M倍”），提取出来放到 `parameters` 中，给出默认值和最大最小值。
+4. 如果用户明确表示确认、没问题、直接执行等，将 `interaction_state` 设置为 "CONFIRMED"。
 
 当前已有条件树状态：
-{current_conditions_json}
+{{current_conditions_json}}
 
 用户最新输入：
-"{user_input}"
+"{{user_input}}"
 """
 
 CODE_GEN_PROMPT = """
-你是一个专业的 Python 量化工程师。你的任务是基于结构化的选股条件，生成能在 DuckDB/Pandas 环境下执行的代码。
-环境假设：
-- 全市场日线及基本面数据已经通过 DuckDB 注册为名为 `v_fact_kline` 的视图。
-- 视图包含字段: ts_code, trade_date, open, close, high, low, vol, amount, turnover_rate, pct_change, change, amplitude, total_mv, pe_ttm, pb, is_st.
-- 你被允许使用 duckdb, pandas, pandas_ta 库。
+你是一个专业的 Python 量化工程师。你的任务是将用户在前端确认的 JSON 条件树，零误差地转化为能在 DuckDB/Pandas 下运行的 Python 脚本。
 
-你的任务是：
-1. 编写一个完整的 Python 脚本。
-2. 由于数据量极大，建议你先利用 duckdb 的原生 SQL 算子进行初步的指标计算和数据过滤，尽量不要把所有数据拉进 Pandas 计算。例如，使用 DuckDB 的移动窗口函数计算均线。
-3. 你的代码不需要额外处理数据库连接等。我们会在沙盒环境中提供一个 `conn` 变量 (代表 duckdb connection)，或者你代码里写 `import duckdb\nconn = duckdb.connect()` 也可以。
-4. 将最终符合你逻辑过滤后的最新一天的股票列表 DataFrame 赋值给变量 `final_df`。系统会从沙盒里提取它。
+环境假设与规范：
+1. `df` 已经是一个包含 `v_fact_kline` 近 N 天数据的 Pandas DataFrame，并已按 `ts_code` 和 `trade_date` 排序。
+2. 我们预置了 `import llm_agent.quant_macros as macros`。
+3. 对于 JSON 中的每个条件：
+   - 如果它对应了黑话路由的宏（名称以 `macro_` 开头），你直接调用 `macros.macro_xxx(df, **parameters)`。该函数会返回一个 Boolean Series。
+   - 如果它是普通的条件，请你用 Pandas 向量化运算实现，同样生成一个 Boolean Series。
+4. 将所有条件的 Boolean Series 使用按位与 `&` 拼接起来作为最终掩码。
+5. 提取最后一天（最新交易日）掩码为 True 的 `ts_code` 列表，赋值给全局变量 `final_codes`（list类型）。
 
-基于以下已经确认的结构化条件，生成纯粹的 Python 代码。请确保代码不要有安全漏洞，不要使用 eval/exec/os.system。
+不要生成读取数据库的代码，沙盒会提前把数据准备好传入 `df` 中。你只需要输出纯净的处理逻辑。
 
 条件列表：
 {conditions_json}
@@ -80,16 +92,22 @@ def _generate_json(prompt: str) -> dict:
         "required": ["interaction_state", "ai_message", "extracted_conditions"]
     }
     
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=schema,
-            temperature=0.2,
-        ),
-    )
-    return json.loads(response.text)
+    try:
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=schema,
+                temperature=0.2,
+            ),
+        )
+        if response.text is None:
+            raise ValueError("Empty response text from Gemini")
+        return json.loads(response.text)
+    except Exception as e:
+        logger.error(f"Failed to generate JSON: {e}")
+        raise
 
 def _generate_code(conditions: list) -> str:
     logger.info("Generating Pandas/DuckDB code via Gemini...")
@@ -105,6 +123,9 @@ def _generate_code(conditions: list) -> str:
     )
     
     text = response.text
+    if text is None:
+        return ""
+        
     if "```python" in text:
         code = text.split("```python")[1].split("```")[0].strip()
     elif "```" in text:
