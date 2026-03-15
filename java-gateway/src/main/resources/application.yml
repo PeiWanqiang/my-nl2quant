@@ -1,6 +1,11 @@
 server:
   port: 8080
 
+spring:
+  mvc:
+    async:
+      request-timeout: 120000
+
 nl2quant:
   python-engine:
     url: http://localhost:8000

@@ -15,8 +15,8 @@ public class QuantChatController {
 
     private final WebClient webClient;
 
-    public QuantChatController(@Value("${nl2quant.python-engine.url}") String engineUrl) {
-        this.webClient = WebClient.builder().baseUrl(engineUrl).build();
+    public QuantChatController(WebClient.Builder webClientBuilder, @Value("${nl2quant.python-engine.url}") String engineUrl) {
+        this.webClient = webClientBuilder.baseUrl(engineUrl).build();
     }
 
     @PostMapping("/chat/negotiate")
