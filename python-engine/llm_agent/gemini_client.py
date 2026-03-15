@@ -1,49 +1,81 @@
 import os
 import json
+import inspect
+from typing import List, Dict, Any
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from .protocol import QuantChatResponse, ExtractedCondition, ConditionParameter
 from loguru import logger
-from typing import Any
+
+# 引入我们在 protocol.py 中定义的数据契约
+from .protocol import QuantChatResponse, ExtractedCondition, ConditionParameter
 
 load_dotenv()
 
+# 初始化 Gemini 客户端 (推荐使用系统环境变量 GEMINI_API_KEY)
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-
-# 使用 Gemini 2.5 Flash 或 Pro 来保证结构化输出的稳定性，由于我们是测试所以用 2.5-flash 会很快
-# =========================================================================
-# System Definitions
-# =========================================================================
-
-# 动态加载宏函数库
-import inspect
-import llm_agent.quant_macros as macros
-macro_funcs_info = []
-for name, f in inspect.getmembers(macros, inspect.isfunction):
-    if name.startswith('macro_'):
-        sig = inspect.signature(f)
-        params = [p.name for p in sig.parameters.values() if p.name != 'df']
-        macro_funcs_info.append(f"{name}({', '.join(params)})")
-
 MODEL_NAME = 'gemini-2.5-flash'
 
+# =========================================================================
+# 1. 动态装载底层宏函数库 (Macro Introspection)
+# =========================================================================
+import llm_agent.quant_macros as macros
+
+def _load_macro_signatures() -> str:
+    """动态扫描 quant_macros.py，提取所有宏函数的签名和注释，喂给大模型做上下文"""
+    macro_info_list = []
+    for name, func in inspect.getmembers(macros, inspect.isfunction):
+        if name.startswith('macro_'):
+            sig = inspect.signature(func)
+            # 提取除 df 之外的所有可调参参数
+            params = [p.name for p in sig.parameters.values() if p.name != 'df']
+            # 提取函数文档注释 (Docstring)，如果没写注释则使用兜底提示
+            doc = inspect.getdoc(func) or "未提供描述，请按字面意思理解"
+            
+            macro_info_list.append(f"- 【函数名】: {name}({', '.join(params)})\n  【功  能】: {doc}")
+    
+    return "\n".join(macro_info_list)
+
+MACRO_FUNCS_CONTEXT = _load_macro_signatures()
+
+
+# =========================================================================
+# 2. 系统提示词定义 (System Prompts)
+# =========================================================================
+
 NEGOTIATE_PROMPT = f"""
-你是一个名为 NL2Quant 的专业量化策略分析师。你的目标是理解用户的自然语言选股意图，并将其转化为结构化的、可量化的技术或基本面条件。
-系统将这些条件在前端渲染为带有滑动条的白盒界面，供用户微调。
+你是一个名为 NL2Quant 的顶级量化策略架构师。你的目标是理解用户的自然语言选股意图，并将其转化为结构化的 JSON 条件树。
 
-当用户提出新的选股需求，或者在已有条件上进行补充时：
-1. 深入理解用户的金融意图。
-2. 意图拆解与路由：
-   - 【标准解析】：对于明确的比较运算（如“市盈率小于30”、“今日涨跌幅大于5%”），提取为具体条件，参数中包含具体的阈值。
-   - 【黑话路由 (Known Jargon)】：系统内置了 50 个极其稳定的算法宏。你必须**尽可能将用户的自然语言映射到这些宏上**。
-     如果用户的意图匹配以下某个宏，必须将该条件设为黑话算子，在 JSON 中记录。可用的宏列表：
-      {macro_funcs_info}
-   - 【未知拦截 (Unknown Jargon)】：遇到无法用数学表达式或现有宏定义的极其主观的词汇（如“主力洗盘”、“庄家吸筹”、“龙头股”），必须阻断生成。将 `interaction_state` 设置为 "CLARIFYING"，并在 `ai_message` 中抛出提问，要求用户给出具体的量化指标（如换手率、振幅）。
-3. 对于每个条件，如果包含可变量化的参数（如“N日”、“M倍”），提取出来放到 `parameters` 中，给出默认值和最大最小值。
-4. 如果用户明确表示确认、没问题、直接执行等，将 `interaction_state` 设置为 "CONFIRMED"。
+【意图路由规则】：
+1. 优先映射宏库：系统内置了极其稳定的算法宏。如果用户的意图匹配以下宏，必须优先使用它们：
+{MACRO_FUNCS_CONTEXT}
+2. 标准指标解析：如果不是复杂的宏，而是基础的比较（如“市盈率小于30”），直接提取条件。
+3. 拦截主观黑话：遇到无法量化的词汇（如“主力洗盘”、“龙头股”），将 interaction_state 设为 "CLARIFYING"，并在 ai_message 中要求用户给出具体指标。
 
-当前已有条件树状态：
+【前端 UI 渲染协议 - 极其重要】：
+你需要为每个提取出的条件生成 `ui_template` 和 `parameters`。
+- `ui_template`: 一句大白话，其中可微调的参数必须用大括号包裹。例如："股票价格连续 {{n}} 天上涨" 或 "市盈率小于 {{threshold}}"。
+- `parameters`: 一个数组，包含模板中所有占位符的具体属性（name, value, type, min, max）。
+
+【强制输出格式】：
+你必须且只能输出如下 JSON 格式，不要带有 ```json 的 Markdown 标记：
+{{
+  "interaction_state": "CONFIRMED", // 或者 "CLARIFYING"
+  "ai_message": "我已为您提取了以下条件...",
+  "extracted_conditions": [
+    {{
+      "id": "cond_01",
+      "name": "连续上涨",
+      "description": "调用宏 macro_31_consecutive_up",
+      "ui_template": "股票价格连续 {{n}} 天上涨",
+      "parameters": [
+        {{"name": "n", "value": 3, "type": "int", "min": 1, "max": 10}}
+      ]
+    }}
+  ]
+}}
+
+当前已存在的条件树：
 {{current_conditions_json}}
 
 用户最新输入：
@@ -51,66 +83,79 @@ NEGOTIATE_PROMPT = f"""
 """
 
 CODE_GEN_PROMPT = """
-你是一个专业的 Python 量化工程师。你的任务是将用户在前端确认的 JSON 条件树，零误差地转化为能在 DuckDB/Pandas 下运行的 Python 脚本。
+你是一个严谨的 Python 量化执行引擎。请将用户确认的 JSON 条件树，零误差地翻译为 Pandas 代码。
 
-环境假设与规范：
-1. `df` 已经是一个包含 `v_fact_kline` 近 N 天数据的 Pandas DataFrame，并已按 `ts_code` 和 `trade_date` 排序。
-2. 我们预置了 `import llm_agent.quant_macros as macros`。
-3. **【重要】宏函数调用规则**：
-   - 可用的宏函数及参数签名列表：{macro_funcs_info}
-   - 调用时必须使用完整的函数名和正确的参数，例如：`macros.macro_21_macd_golden_cross(df)` 或 `macros.macro_01_volume_spike(df, n=5, m=1.5)`
-   - **绝对禁止**生成不存在的函数名或参数，如 `macro_macd_golden_cross` 或 `macro_37_platform_breakout(df, n=10, m=2)`（错误，因为该函数只有 n 参数）
-4. 对于 JSON 中的每个条件：
-   - 如果它对应了黑话路由的宏（名称以 `macro_` 开头），你直接调用 `macros.macro_XX_xxx(df, **parameters)`。该函数会返回一个 Boolean Series。
-   - 如果它是普通的条件，请你用 Pandas 向量化运算实现，同样生成一个 Boolean Series。
-5. 将所有条件的 Boolean Series 使用按位与 `&` 拼接起来作为最终掩码。
-6. 提取最后一天（最新交易日）掩码为 True 的 `ts_code` 列表，赋值给全局变量 `final_codes`（list类型）。
+【执行环境与安全沙盒规范】：
+1. 预置导入：`import llm_agent.quant_macros as macros` 已经存在，你可以直接调用。
+2. 绝对闭包：你必须输出一个名为 `apply_strategy(df)` 的函数，接收 df，返回 df。绝不允许污染全局命名空间。
+3. 可用宏白名单：
+{macro_funcs_info}
+4. 逻辑组合：使用 Pandas 的按位逻辑符 `&` 或 `|` 组合多个条件的掩码 (Boolean Series)。
 
-不要生成读取数据库的代码，沙盒会提前把数据准备好传入 `df` 中。你只需要输出纯净的处理逻辑。
+【标准代码输出模板】：
+```python
+def apply_strategy(df):
+    import pandas as pd
+    import numpy as np
+    
+    # 条件1：宏调用
+    cond_1 = macros.macro_31_consecutive_up(df, n=3)
+    # 条件2：基础 Pandas 向量化
+    cond_2 = df['pe_ttm'] < 30
+    
+    final_mask = cond_1 & cond_2
+    
+    # 强制只返回最新一个交易日符合条件的股票，避免买入历史股票
+    latest_date = df['trade_date'].max()
+    return df[final_mask & (df['trade_date'] == latest_date)]
 
 条件列表：
 {conditions_json}
 """
 
+
+# We define a simpler JSON schema to ensure stability
+schema = {
+    "type": "OBJECT",
+    "properties": {
+        "interaction_state": {"type": "STRING", "description": "'CLARIFYING' or 'CONFIRMED'"},
+        "ai_message": {"type": "STRING", "description": "Response to user"},
+        "extracted_conditions": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "id": {"type": "STRING", "description": "Unique ID for this condition"},
+                    "name": {"type": "STRING", "description": "Human readable name"},
+                    "description": {"type": "STRING", "description": "Detailed description"},
+                    "ui_template": {
+                        "type": "STRING", 
+                        "description": "前端渲染模板。必须将可变参数用大括号包裹。例如：'股票价格连续 {n} 天上涨' 或 '今日突破 {n} 日均线'"
+                    },
+                    "parameters": {
+                        "type": "ARRAY",
+                        "description": "List of parameters. IMPORTANT: Extract macro arguments (n, m, etc.) as parameters with defaults.",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "name": {"type": "STRING", "description": "Parameter name (e.g., 'n', 'm')"},
+                                "value": {"type": "NUMBER", "description": "Extracted default value"},
+                                "type": {"type": "STRING", "description": "'int' or 'float'"},
+                                "min": {"type": "NUMBER", "description": "Minimum allowed value"},
+                                "max": {"type": "NUMBER", "description": "Maximum allowed value"}
+                            },
+                            "required": ["name", "value", "type"]
+                        }
+                    }
+                },
+                "required": ["id", "name", "description", "ui_template", "parameters"]
+            }
+        }
+    },
+    "required": ["interaction_state", "ai_message", "extracted_conditions"]
+}
 def _generate_json(prompt: str) -> dict:
     logger.info(f"Calling Gemini for structured JSON generation")
-    
-    # We define a simpler JSON schema to ensure stability
-    schema = {
-        "type": "OBJECT",
-        "properties": {
-            "interaction_state": {"type": "STRING", "description": "'CLARIFYING' or 'CONFIRMED'"},
-            "ai_message": {"type": "STRING", "description": "Response to user"},
-            "extracted_conditions": {
-                "type": "ARRAY",
-                "items": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "id": {"type": "STRING", "description": "Unique ID for this condition"},
-                        "name": {"type": "STRING", "description": "Human readable name"},
-                        "description": {"type": "STRING", "description": "Detailed description"},
-                        "parameters": {
-                            "type": "ARRAY",
-                            "description": "List of parameters. IMPORTANT: If using a macro (e.g., macro_37), extract its arguments (n, m, short, long, etc.) as parameters with default values and ranges.",
-                            "items": {
-                                "type": "OBJECT",
-                                "properties": {
-                                    "name": {"type": "STRING", "description": "Parameter name (e.g., 'n', 'm', 'threshold')"},
-                                    "value": {"type": "NUMBER", "description": "Extracted default value"},
-                                    "type": {"type": "STRING", "description": "'int' or 'float'"},
-                                    "min": {"type": "NUMBER", "description": "Minimum allowed value"},
-                                    "max": {"type": "NUMBER", "description": "Maximum allowed value"}
-                                },
-                                "required": ["name", "value", "type"]
-                            }
-                        }
-                    },
-                    "required": ["id", "name", "description", "parameters"]
-                }
-            }
-        },
-        "required": ["interaction_state", "ai_message", "extracted_conditions"]
-    }
     
     try:
         response = client.models.generate_content(
