@@ -19,7 +19,12 @@ client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 # 动态加载宏函数库
 import inspect
 import llm_agent.quant_macros as macros
-macro_funcs = [name for name, f in inspect.getmembers(macros, inspect.isfunction) if name.startswith('macro_')]
+macro_funcs_info = []
+for name, f in inspect.getmembers(macros, inspect.isfunction):
+    if name.startswith('macro_'):
+        sig = inspect.signature(f)
+        params = [p.name for p in sig.parameters.values() if p.name != 'df']
+        macro_funcs_info.append(f"{name}({', '.join(params)})")
 
 MODEL_NAME = 'gemini-2.5-flash'
 
@@ -33,7 +38,7 @@ NEGOTIATE_PROMPT = f"""
    - 【标准解析】：对于明确的比较运算（如“市盈率小于30”、“今日涨跌幅大于5%”），提取为具体条件，参数中包含具体的阈值。
    - 【黑话路由 (Known Jargon)】：系统内置了 50 个极其稳定的算法宏。你必须**尽可能将用户的自然语言映射到这些宏上**。
      如果用户的意图匹配以下某个宏，必须将该条件设为黑话算子，在 JSON 中记录。可用的宏列表：
-     {macro_funcs}
+      {macro_funcs_info}
    - 【未知拦截 (Unknown Jargon)】：遇到无法用数学表达式或现有宏定义的极其主观的词汇（如“主力洗盘”、“庄家吸筹”、“龙头股”），必须阻断生成。将 `interaction_state` 设置为 "CLARIFYING"，并在 `ai_message` 中抛出提问，要求用户给出具体的量化指标（如换手率、振幅）。
 3. 对于每个条件，如果包含可变量化的参数（如“N日”、“M倍”），提取出来放到 `parameters` 中，给出默认值和最大最小值。
 4. 如果用户明确表示确认、没问题、直接执行等，将 `interaction_state` 设置为 "CONFIRMED"。
@@ -51,11 +56,15 @@ CODE_GEN_PROMPT = """
 环境假设与规范：
 1. `df` 已经是一个包含 `v_fact_kline` 近 N 天数据的 Pandas DataFrame，并已按 `ts_code` 和 `trade_date` 排序。
 2. 我们预置了 `import llm_agent.quant_macros as macros`。
-3. 对于 JSON 中的每个条件：
-   - 如果它对应了黑话路由的宏（名称以 `macro_` 开头），你直接调用 `macros.macro_xxx(df, **parameters)`。该函数会返回一个 Boolean Series。
+3. **【重要】宏函数调用规则**：
+   - 可用的宏函数及参数签名列表：{macro_funcs_info}
+   - 调用时必须使用完整的函数名和正确的参数，例如：`macros.macro_21_macd_golden_cross(df)` 或 `macros.macro_01_volume_spike(df, n=5, m=1.5)`
+   - **绝对禁止**生成不存在的函数名或参数，如 `macro_macd_golden_cross` 或 `macro_37_platform_breakout(df, n=10, m=2)`（错误，因为该函数只有 n 参数）
+4. 对于 JSON 中的每个条件：
+   - 如果它对应了黑话路由的宏（名称以 `macro_` 开头），你直接调用 `macros.macro_XX_xxx(df, **parameters)`。该函数会返回一个 Boolean Series。
    - 如果它是普通的条件，请你用 Pandas 向量化运算实现，同样生成一个 Boolean Series。
-4. 将所有条件的 Boolean Series 使用按位与 `&` 拼接起来作为最终掩码。
-5. 提取最后一天（最新交易日）掩码为 True 的 `ts_code` 列表，赋值给全局变量 `final_codes`（list类型）。
+5. 将所有条件的 Boolean Series 使用按位与 `&` 拼接起来作为最终掩码。
+6. 提取最后一天（最新交易日）掩码为 True 的 `ts_code` 列表，赋值给全局变量 `final_codes`（list类型）。
 
 不要生成读取数据库的代码，沙盒会提前把数据准备好传入 `df` 中。你只需要输出纯净的处理逻辑。
 
@@ -123,7 +132,10 @@ def _generate_json(prompt: str) -> dict:
 def _generate_code(conditions: list) -> str:
     logger.info("Generating Pandas/DuckDB code via Gemini...")
     cond_list = [c.model_dump() if hasattr(c, 'model_dump') else c for c in conditions]
-    prompt = CODE_GEN_PROMPT.format(conditions_json=json.dumps(cond_list, ensure_ascii=False))
+    prompt = CODE_GEN_PROMPT.format(
+        conditions_json=json.dumps(cond_list, ensure_ascii=False),
+        macro_funcs_info=macro_funcs_info
+    )
     
     response = client.models.generate_content(
         model=MODEL_NAME,
