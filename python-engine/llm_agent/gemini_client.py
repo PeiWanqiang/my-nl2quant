@@ -8,6 +8,7 @@ from loguru import logger
 # 引入我们在 protocol.py 中定义的数据契约
 from .protocol import QuantChatResponse, ExtractedCondition, ConditionParameter
 from .model_client import get_model_client, BaseModelClient
+from sandbox.ast_validator import validate_code
 
 load_dotenv()
 
@@ -185,26 +186,49 @@ def _generate_json(prompt: str) -> dict:
         logger.error(f"Failed to generate JSON: {e}")
         raise
 
-def _generate_code(conditions: list) -> str:
-    logger.info("Generating Pandas/DuckDB code via model...")
-    cond_list = [c.model_dump() if hasattr(c, 'model_dump') else c for c in conditions]
-    prompt = CODE_GEN_PROMPT.format(
-        conditions_json=json.dumps(cond_list, ensure_ascii=False),
-        macro_funcs_info=MACRO_FUNCS_CONTEXT
-    )
+def generate_code(conditions: list, max_retries: int = 3) -> str:
+    """
+    Generate Pandas code from conditions with retry logic.
+    """
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Generating Pandas/DuckDB code via model (attempt {attempt + 1})...")
+            cond_list = [c.model_dump() if hasattr(c, 'model_dump') else c for c in conditions]
+            prompt = CODE_GEN_PROMPT.format(
+                conditions_json=json.dumps(cond_list, ensure_ascii=False),
+                macro_funcs_info=MACRO_FUNCS_CONTEXT
+            )
+            
+            text = model_client.generate_content(
+                prompt=prompt,
+                temperature=0.1,
+            )
+            
+            if "```python" in text:
+                code = text.split("```python")[1].split("```")[0].strip()
+            elif "```" in text:
+                code = text.split("```")[1].split("```")[0].strip()
+            else:
+                code = text.strip()
+            
+            # Try to validate the code before returning
+            try:
+                validate_code(code)
+                return code
+            except ValueError as e:
+                logger.warning(f"Code validation failed on attempt {attempt + 1}: {e}")
+                last_error = e
+                # Add error context to prompt for retry
+                prompt += f"\n\n注意：上次生成的代码有语法/安全错误：{str(e)}，请修正后重新生成。"
+                continue
+                
+        except Exception as e:
+            logger.warning(f"Code generation failed on attempt {attempt + 1}: {e}")
+            last_error = e
+            continue
     
-    text = model_client.generate_content(
-        prompt=prompt,
-        temperature=0.1,
-    )
-        
-    if "```python" in text:
-        code = text.split("```python")[1].split("```")[0].strip()
-    elif "```" in text:
-        code = text.split("```")[1].split("```")[0].strip()
-    else:
-        code = text.strip()
-    return code
+    raise ValueError(f"Failed to generate valid code after {max_retries} attempts: {last_error}")
 
 def negotiate_conditions(user_input: str, current_conditions: list) -> QuantChatResponse:
     try:
@@ -251,10 +275,10 @@ def negotiate_conditions(user_input: str, current_conditions: list) -> QuantChat
         )
         
         # 2. 如果已确认，执行代码生成 (JSON -> Code)
-        # 只有当用户明确确认时（前端会发带有“确认”的字符串），才去执行耗时的代码生成逻辑
+        # 只有当用户明确确认时（前端会发带有"确认"的字符串），才去执行耗时的代码生成逻辑
         if "确认" in user_input:
             result.interaction_state = "CONFIRMED" # Force it if user says confirm
-            code = _generate_code(result.extracted_conditions)
+            code = generate_code(result.extracted_conditions)
             result.executable_code = code
             
         return result

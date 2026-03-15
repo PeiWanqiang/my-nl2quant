@@ -5,10 +5,11 @@ import traceback
 import pandas as pd
 
 from llm_agent.protocol import QuantChatRequest, QuantChatResponse, ExecuteRequest
-from llm_agent.gemini_client import negotiate_conditions
+from llm_agent.gemini_client import negotiate_conditions, generate_code
 from sandbox.ast_validator import validate_code
 from sandbox.subprocess_exec import execute_in_sandbox
 from data_sync.common import get_duckdb_conn
+from loguru import logger
 
 app = FastAPI(title="NL2Quant Python Engine")
 
@@ -95,6 +96,71 @@ def execute_quant_code(request: ExecuteRequest):
         
     except ValueError as e:
         raise HTTPException(status_code=403, detail=f"Security/Runtime exception: {str(e)}")
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/quant/confirm_and_execute")
+def confirm_and_execute(request: QuantChatRequest):
+    """
+    一步完成：确认条件 -> 生成代码 -> 验证代码 -> 执行代码 -> 返回股票结果
+    """
+    try:
+        # 1. 生成代码（带重试逻辑）
+        logger.info("Generating code with retry logic...")
+        code = generate_code(request.current_conditions or [])
+        
+        # 2. 验证并执行代码
+        logger.info("Validating and executing code...")
+        validate_code(code)
+        matched_stocks = execute_in_sandbox(code)
+        
+        # 3. 获取股票详细信息
+        data = []
+        if matched_stocks:
+            target_codes = matched_stocks[:50]
+            codes_str = ", ".join([f"'{str(c).zfill(6)}'" for c in target_codes])
+            
+            conn = get_duckdb_conn()
+            
+            query = f"""
+            WITH LatestKline AS (
+                SELECT ts_code, close as price, pct_change as change,
+                       ROW_NUMBER() OVER(PARTITION BY ts_code ORDER BY trade_date DESC) as rn
+                FROM v_fact_kline
+                WHERE ts_code IN ({codes_str})
+            )
+            SELECT l.ts_code as code, d.stock_name as name, l.price, l.change
+            FROM LatestKline l
+            LEFT JOIN read_parquet('data/dim/dim_stock_list.parquet') d ON l.ts_code = d.ts_code
+            WHERE l.rn = 1
+            """
+            try:
+                result_df = conn.execute(query).df()
+                
+                for _, row in result_df.iterrows():
+                    price_val = f"{row['price']:.2f}" if pd.notnull(row['price']) else "N/A"
+                    change_val = f"{row['change']:.2f}%" if pd.notnull(row['change']) else "N/A"
+                    name_val = row['name'] if pd.notnull(row['name']) else "Unknown"
+                    
+                    data.append({
+                        "code": row['code'],
+                        "name": name_val,
+                        "price": price_val,
+                        "change": change_val
+                    })
+            except Exception as e:
+                print(f"Failed to fetch detailed info: {e}")
+                data = [{"code": code, "name": "Unknown", "price": "N/A", "change": "N/A"} for code in target_codes]
+                
+        return {
+            "status": "success", 
+            "message": f"Found {len(matched_stocks)} stocks", 
+            "data": data
+        }
+        
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=f"Code validation/execution error: {str(e)}")
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

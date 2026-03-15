@@ -38,4 +38,13 @@ public class QuantChatController {
                 .retrieve()
                 .toEntity(Map.class);
     }
+
+    @PostMapping("/quant/confirm_and_execute")
+    public Mono<ResponseEntity<Map>> confirmAndExecute(@RequestBody Map<String, Object> requestBody) {
+        return webClient.post()
+                .uri("/api/v1/quant/confirm_and_execute")
+                .bodyValue(requestBody)
+                .retrieve()
+                .toEntity(Map.class);
+    }
 }

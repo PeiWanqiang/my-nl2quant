@@ -178,8 +178,8 @@ class MiniMaxClient(BaseModelClient):
             "max_tokens": max_tokens,
         }
         
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
+        # MiniMax doesn't support response_format like OpenAI, so we skip it
+        # and rely on prompting the model to return JSON
         
         response = requests.post(
             f"{self.base_url}/text/chatcompletion_v2",
@@ -188,7 +188,9 @@ class MiniMaxClient(BaseModelClient):
             timeout=120
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        logger.info(f"MiniMax API response: {result}")
+        return result
     
     def generate_content(self, prompt: str, system_prompt: str = None, temperature: float = 0.1, max_tokens: int = 8192) -> str:
         messages = []
@@ -235,14 +237,14 @@ def get_model_client(model_type: str = None) -> BaseModelClient:
     
     if "gemini" in model_type:
         if "3.1" in model_type or "pro" in model_type:
-            return GeminiClient(model="gemini-2.0-pro")
-        return GeminiClient(model="gemini-2.5-flash")
+            return GeminiClient(model="gemini-3.1-pro-preview")
+        return GeminiClient(model="gemini-3.1-pro-preview")
     
     elif "deepseek" in model_type:
-        return DeepSeekClient(model="deepseek-chat")
+        return DeepSeekClient(model="deepseek-reasoner")
     
     elif "minimax" in model_type:
-        return MiniMaxClient(model="MiniMax-Text-01")
+        return MiniMaxClient(model="MiniMax-M2.5")
     
     else:
         logger.warning(f"Unknown model type: {model_type}, defaulting to Gemini")

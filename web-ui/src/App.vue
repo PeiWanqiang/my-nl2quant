@@ -110,28 +110,17 @@ const handleExecute = async () => {
   
   try {
      // Because users can edit parameters, we need to request the AI to generate NEW code based on the edited conditions
-     const codeRes = await fetch('/api/v1/gateway/chat/negotiate', {
-       method: 'POST',
-       headers: { 'Content-Type': 'application/json' },
-       body: JSON.stringify({ 
-         user_input: "确认执行当前策略",
-         current_conditions: conditions.value 
-       })
-     });
-     
-     const codeData = await codeRes.json();
-     if (!codeData.executable_code) {
-       throw new Error("未能生成执行代码");
-     }
-     
-     // Now execute the newly generated code
-     const res = await fetch('/api/v1/gateway/quant/execute', {
-       method: 'POST',
-       headers: { 'Content-Type': 'application/json' },
-       body: JSON.stringify({ code: codeData.executable_code })
-     });
-     
-     const data = await res.json()
+      // 直接调用 confirm_and_execute 一步完成
+      const res = await fetch('/api/v1/gateway/quant/confirm_and_execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          user_input: "确认执行当前策略",
+          current_conditions: conditions.value 
+        })
+      });
+      
+      const data = await res.json()
      if (res.ok) {
        executionResults.value = data.data || []
        ElMessage.success(`执行成功，共找到 ${executionResults.value.length} 只股票`)
