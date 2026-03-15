@@ -48,17 +48,36 @@ def execute_in_sandbox(code: str) -> list:
         
         # Load finance data as a separate frame to avoid massive joins in DuckDB
         # We can pass it into the sandbox if the LLM generated code needs it
-        finance_df = conn.execute("SELECT ts_code, report_date, net_profit FROM read_parquet('data/fact_finance/*.parquet') WHERE report_date >= '2022-01-01'").df()
+        logger.info("Loading finance data...")
+        finance_df = conn.execute("SELECT ts_code, report_date, net_profit FROM read_parquet('data/fact_finance/*.parquet')").df()
+        
+        logger.info(f"Finance data shape: {finance_df.shape}")
+        logger.info(f"Finance data columns: {finance_df.columns.tolist()}")
+        logger.info(f"Finance data sample:\n{finance_df.head()}")
+        
+        # Check if net_profit has valid values
+        if 'net_profit' in finance_df.columns:
+            non_null_count = finance_df['net_profit'].notna().sum()
+            logger.info(f"Finance data net_profit non-null count: {non_null_count}")
         
         # We merge them in Pandas which is often safer/clearer for memory if sizes are reasonable
         df['year'] = pd.to_datetime(df['trade_date']).dt.year
         finance_df['year'] = pd.to_datetime(finance_df['report_date']).dt.year
         
+        logger.info(f"Kline year range: {df['year'].min()} - {df['year'].max()}")
+        logger.info(f"Finance year range: {finance_df['year'].min()} - {finance_df['year'].max()}")
+        
         # Take the latest report per year per stock
         finance_annual = finance_df.groupby(['ts_code', 'year'])['net_profit'].last().reset_index()
         
+        logger.info(f"Finance annual shape: {finance_annual.shape}")
+        
         # Merge into main df
         df = pd.merge(df, finance_annual, on=['ts_code', 'year'], how='left')
+        
+        # Log merge result
+        merged_non_null = df['net_profit'].notna().sum()
+        logger.info(f"After merge, net_profit non-null count: {merged_non_null} / {len(df)}")
         
     except Exception as e:
         logger.error(f"Failed to fetch context data: {e}")

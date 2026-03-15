@@ -431,22 +431,56 @@ def macro_51_consecutive_loss(df: pd.DataFrame, n: int = 3) -> pd.Series:
     """连续亏损。公司连续N年净利润为负。该条件基于年度净利润数据(net_profit)进行计算。
     
     注意：df 需要包含 'ts_code', 'year', 'net_profit' 列。
+    如果可用数据不足N年，会自动使用实际可用年份数。
     """
+    from loguru import logger
+    
     if 'net_profit' not in df.columns:
+        logger.warning("macro_51_consecutive_loss: net_profit column not found")
+        return pd.Series(False, index=df.index)
+    
+    # Check if there's valid net_profit data
+    valid_profit = df[df['net_profit'].notna()]
+    logger.info(f"macro_51_consecutive_loss: rows with valid net_profit: {len(valid_profit)} / {len(df)}")
+    
+    if len(valid_profit) == 0:
+        logger.warning("macro_51_consecutive_loss: no valid net_profit data")
         return pd.Series(False, index=df.index)
     
     annual = df[['ts_code', 'year', 'net_profit']].drop_duplicates().sort_values(['ts_code', 'year'])
     annual['is_loss'] = annual['net_profit'] < 0
     
+    logger.info(f"macro_51_consecutive_loss: annual data rows: {len(annual)}")
+    logger.info(f"macro_51_consecutive_loss: unique stocks: {annual['ts_code'].nunique()}")
+    
+    # Count how many stocks have loss in each year
+    loss_by_year = annual.groupby('year')['is_loss'].sum()
+    logger.info(f"macro_51_consecutive_loss: losses by year: {dict(loss_by_year)}")
+    
+    # Use actual years that have valid net_profit data, not kline year range
+    valid_years = annual[annual['net_profit'].notna()]['year'].unique()
+    valid_years = sorted(valid_years)
+    min_year = int(min(valid_years))
+    max_year = int(max(valid_years))
+    years_count = len(valid_years)
+    
+    logger.info(f"macro_51_consecutive_loss: valid finance year range {min_year}-{max_year}, count: {years_count}")
+    
+    # If not enough years, adjust n
+    actual_n = n
+    if years_count < n:
+        actual_n = years_count
+        logger.warning(f"macro_51_consecutive_loss: only {years_count} years with finance data, using n={actual_n}")
+    
     def count_consecutive_loss(x):
-        if len(x) < n:
+        if len(x) < actual_n:
             return pd.Series([False] * len(x), index=x.index)
         consecutive = pd.Series(False, index=x.index)
         current_streak = 0
         for i in range(len(x) - 1, -1, -1):
             if x.iloc[i]:
                 current_streak += 1
-                if current_streak >= n:
+                if current_streak >= actual_n:
                     consecutive.iloc[i] = True
             else:
                 current_streak = 0
@@ -454,5 +488,12 @@ def macro_51_consecutive_loss(df: pd.DataFrame, n: int = 3) -> pd.Series:
     
     annual['met'] = annual.groupby('ts_code')['is_loss'].apply(count_consecutive_loss).reset_index(level=0, drop=True)
     
-    result = df.merge(annual[['ts_code', 'year', 'met']], on=['ts_code', 'year'], how='left')['met'].fillna(False)
+    stocks_with_loss = annual[annual['met']]['ts_code'].unique()
+    logger.info(f"macro_51_consecutive_loss: stocks with {actual_n} consecutive years loss: {len(stocks_with_loss)}")
+    
+    # Instead of merging back by year, return True for ALL rows of stocks that meet the condition
+    # This ensures they are found regardless of which trade_date we're filtering by
+    result = df['ts_code'].isin(stocks_with_loss)
+    logger.info(f"macro_51_consecutive_loss: final result True count: {result.sum()} / {len(result)}")
+    
     return result
