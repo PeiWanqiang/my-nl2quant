@@ -72,6 +72,10 @@ def execute_in_sandbox(code: str) -> list:
     try:
         exec(code, restricted_globals)
         
+        # Auto-call apply_strategy if defined
+        if 'apply_strategy' in restricted_globals:
+            restricted_globals['apply_strategy'](restricted_globals['df'])
+        
         result = restricted_globals.get("final_codes", [])
         logger.info(f"Sandbox execution complete. Found {len(result)} stocks.")
         return result

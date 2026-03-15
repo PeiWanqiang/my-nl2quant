@@ -8,6 +8,8 @@ ALLOWED_NODES = (
     ast.keyword, ast.Index, ast.ExtSlice, ast.Import, ast.ImportFrom, ast.alias,
     # Allow control flow for LLM generated code
     ast.If, ast.For, ast.Pass, ast.Lambda, ast.arguments, ast.arg,
+    # Allow function definitions
+    ast.FunctionDef, ast.Return, ast.Global,
     # Allow some math ops
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Lt, ast.Gt, ast.Eq, ast.NotEq,
     ast.LtE, ast.GtE, ast.And, ast.Or, ast.Not, ast.BitAnd, ast.BitOr, ast.Invert

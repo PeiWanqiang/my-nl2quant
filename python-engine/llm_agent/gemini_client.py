@@ -43,18 +43,18 @@ MACRO_FUNCS_CONTEXT = _load_macro_signatures()
 # 2. 系统提示词定义 (System Prompts)
 # =========================================================================
 
-NEGOTIATE_PROMPT = f"""
+NEGOTIATE_PROMPT_TEMPLATE = """
 你是一个名为 NL2Quant 的顶级量化策略架构师。你的目标是理解用户的自然语言选股意图，并将其转化为结构化的 JSON 条件树。
 
 【意图路由规则】：
 1. 优先映射宏库：系统内置了极其稳定的算法宏。如果用户的意图匹配以下宏，必须优先使用它们：
 {MACRO_FUNCS_CONTEXT}
-2. 标准指标解析：如果不是复杂的宏，而是基础的比较（如“市盈率小于30”），直接提取条件。
-3. 拦截主观黑话：遇到无法量化的词汇（如“主力洗盘”、“龙头股”），将 interaction_state 设为 "CLARIFYING"，并在 ai_message 中要求用户给出具体指标。
+2. 标准指标解析：如果不是复杂的宏，而是基础的比较（如"市盈率小于30"），直接提取条件。
+3. 拦截主观黑话：遇到无法量化的词汇（如"主力洗盘"、"龙头股"），将 interaction_state 设为 "CLARIFYING"，并在 ai_message 中要求用户给出具体指标。
 
 【前端 UI 渲染协议 - 极其重要】：
 你需要为每个提取出的条件生成 `ui_template` 和 `parameters`。
-- `ui_template`: 一句大白话，其中可微调的参数必须用大括号包裹。例如："股票价格连续 {{n}} 天上涨" 或 "市盈率小于 {{threshold}}"。
+- `ui_template`: 一句大白话，其中可微调的参数必须用大括号包裹。例如："股票价格连续 $n$ 天上涨" 或 "市盈率小于 $threshold$"。
 - `parameters`: 一个数组，包含模板中所有占位符的具体属性（name, value, type, min, max）。
 
 【强制输出格式】：
@@ -67,7 +67,7 @@ NEGOTIATE_PROMPT = f"""
       "id": "cond_01",
       "name": "连续上涨",
       "description": "调用宏 macro_31_consecutive_up",
-      "ui_template": "股票价格连续 {{n}} 天上涨",
+      "ui_template": "股票价格连续 $n$ 天上涨",
       "parameters": [
         {{"name": "n", "value": 3, "type": "int", "min": 1, "max": 10}}
       ]
@@ -76,11 +76,13 @@ NEGOTIATE_PROMPT = f"""
 }}
 
 当前已存在的条件树：
-{{current_conditions_json}}
+__CURRENT_CONDITIONS__
 
 用户最新输入：
-"{{user_input}}"
+"__USER_INPUT__"
 """
+
+NEGOTIATE_PROMPT = NEGOTIATE_PROMPT_TEMPLATE.format(MACRO_FUNCS_CONTEXT=MACRO_FUNCS_CONTEXT)
 
 CODE_GEN_PROMPT = """
 你是一个严谨的 Python 量化执行引擎。请将用户确认的 JSON 条件树，零误差地翻译为 Pandas 代码。
@@ -169,6 +171,7 @@ def _generate_json(prompt: str) -> dict:
         )
         if response.text is None:
             raise ValueError("Empty response text from Gemini")
+        logger.info(f"Gemini raw response: {response.text}")
         return json.loads(response.text)
     except Exception as e:
         logger.error(f"Failed to generate JSON: {e}")
@@ -179,7 +182,7 @@ def _generate_code(conditions: list) -> str:
     cond_list = [c.model_dump() if hasattr(c, 'model_dump') else c for c in conditions]
     prompt = CODE_GEN_PROMPT.format(
         conditions_json=json.dumps(cond_list, ensure_ascii=False),
-        macro_funcs_info=macro_funcs_info
+        macro_funcs_info=MACRO_FUNCS_CONTEXT
     )
     
     response = client.models.generate_content(
@@ -205,23 +208,25 @@ def _generate_code(conditions: list) -> str:
 def negotiate_conditions(user_input: str, current_conditions: list) -> QuantChatResponse:
     try:
         current_cond_dicts = [c.model_dump() if hasattr(c, 'model_dump') else c for c in current_conditions]
-        prompt = NEGOTIATE_PROMPT.format(
-            current_conditions_json=json.dumps(current_cond_dicts, ensure_ascii=False, indent=2),
-            user_input=user_input
-        )
+        prompt = NEGOTIATE_PROMPT.replace("__CURRENT_CONDITIONS__", json.dumps(current_cond_dicts, ensure_ascii=False, indent=2)).replace("__USER_INPUT__", user_input)
         
         # 1. 意图解析 (NL -> JSON)
         raw_json = _generate_json(prompt)
         
         # Build the structured Pydantic model for internal handling
         conds = []
+        logger.info(f"Raw JSON from Gemini: {raw_json}")
         for c in raw_json.get("extracted_conditions", []):
             params = {}
             # Handle both array format (new) and dict format (legacy)
             raw_params = c.get("parameters", {})
+            logger.info(f"Processing condition: {c.get('name')}, params type: {type(raw_params)}, value: {raw_params}")
             if isinstance(raw_params, list):
                 for p in raw_params:
-                    params[p["name"]] = ConditionParameter(
+                    if isinstance(p, str):
+                        params[p] = ConditionParameter(value=1, type="int", min=1, max=10)
+                    else:
+                        params[p["name"]] = ConditionParameter(
                         value=p.get("value"),
                         type=p.get("type", "int"),
                         min=p.get("min"),
