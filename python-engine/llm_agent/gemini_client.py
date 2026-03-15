@@ -191,10 +191,15 @@ def generate_code(conditions: list, max_retries: int = 3) -> str:
     Generate Pandas code from conditions with retry logic.
     """
     last_error = None
+    
+    # Log the final conditions
+    cond_list = [c.model_dump() if hasattr(c, 'model_dump') else c for c in conditions]
+    logger.info(f"=== FINAL QUANT CONDITIONS ===")
+    logger.info(f"Conditions: {json.dumps(cond_list, ensure_ascii=False, indent=2)}")
+    
     for attempt in range(max_retries):
         try:
             logger.info(f"Generating Pandas/DuckDB code via model (attempt {attempt + 1})...")
-            cond_list = [c.model_dump() if hasattr(c, 'model_dump') else c for c in conditions]
             prompt = CODE_GEN_PROMPT.format(
                 conditions_json=json.dumps(cond_list, ensure_ascii=False),
                 macro_funcs_info=MACRO_FUNCS_CONTEXT
@@ -211,6 +216,10 @@ def generate_code(conditions: list, max_retries: int = 3) -> str:
                 code = text.split("```")[1].split("```")[0].strip()
             else:
                 code = text.strip()
+            
+            # Log the generated code
+            logger.info(f"=== GENERATED PANDAS CODE ===")
+            logger.info(code)
             
             # Try to validate the code before returning
             try:
