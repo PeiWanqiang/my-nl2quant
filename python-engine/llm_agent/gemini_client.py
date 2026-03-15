@@ -1,20 +1,21 @@
 import os
 import json
 import inspect
-from typing import List, Dict, Any
-from google import genai
-from google.genai import types
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from loguru import logger
 
 # 引入我们在 protocol.py 中定义的数据契约
 from .protocol import QuantChatResponse, ExtractedCondition, ConditionParameter
+from .model_client import get_model_client, BaseModelClient
 
 load_dotenv()
 
-# 初始化 Gemini 客户端 (推荐使用系统环境变量 GEMINI_API_KEY)
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-MODEL_NAME = 'gemini-2.5-flash'
+# 初始化通用模型客户端 (根据环境变量 MODEL_PROVIDER 自动选择)
+# 可选值: gemini, deepseek, minimax
+# 也可以在环境变量中指定具体模型，如: MODEL_PROVIDER=gemini-3.1-pro
+model_client: BaseModelClient = get_model_client(os.environ.get("MODEL_PROVIDER", "gemini"))
+logger.info(f"Model client initialized: {type(model_client).__name__}")
 
 # =========================================================================
 # 1. 动态装载底层宏函数库 (Macro Introspection)
@@ -86,6 +87,14 @@ NEGOTIATE_PROMPT = NEGOTIATE_PROMPT_TEMPLATE.format(MACRO_FUNCS_CONTEXT=MACRO_FU
 
 CODE_GEN_PROMPT = """
 你是一个严谨的 Python 量化执行引擎。请将用户确认的 JSON 条件树，零误差地翻译为 Pandas 代码。
+
+【重要：数据Schema - 必须严格遵守】：
+输入的 df 包含以下列：
+- ts_code: 股票代码 (如 '000001')
+- trade_date: 交易日期 (datetime格式)
+- year: 日历年度 (整数，如 2023, 2024)
+- net_profit: 年度净利润 (浮点数，来自财务数据)
+其他列可能还包括：open, high, low, close, volume 等标准K线字段。
 
 【执行环境与安全沙盒规范】：
 1. 预置导入：`import llm_agent.quant_macros as macros` 已经存在，你可以直接调用。
@@ -162,45 +171,32 @@ schema = {
     "required": ["interaction_state", "ai_message", "extracted_conditions"]
 }
 def _generate_json(prompt: str) -> dict:
-    logger.info(f"Calling Gemini for structured JSON generation")
+    logger.info(f"Calling model for structured JSON generation")
     
     try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=schema,
-                temperature=0.2,
-            ),
+        result = model_client.generate_json(
+            prompt=prompt,
+            temperature=0.2,
+            json_schema=schema
         )
-        if response.text is None:
-            raise ValueError("Empty response text from Gemini")
-        logger.info(f"Gemini raw response: {response.text}")
-        return json.loads(response.text)
+        logger.info(f"Model raw response: {result}")
+        return result
     except Exception as e:
         logger.error(f"Failed to generate JSON: {e}")
         raise
 
 def _generate_code(conditions: list) -> str:
-    logger.info("Generating Pandas/DuckDB code via Gemini...")
+    logger.info("Generating Pandas/DuckDB code via model...")
     cond_list = [c.model_dump() if hasattr(c, 'model_dump') else c for c in conditions]
     prompt = CODE_GEN_PROMPT.format(
         conditions_json=json.dumps(cond_list, ensure_ascii=False),
         macro_funcs_info=MACRO_FUNCS_CONTEXT
     )
     
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.1,
-        ),
+    text = model_client.generate_content(
+        prompt=prompt,
+        temperature=0.1,
     )
-    
-    text = response.text
-    if text is None:
-        return ""
         
     if "```python" in text:
         code = text.split("```python")[1].split("```")[0].strip()

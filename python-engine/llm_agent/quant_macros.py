@@ -426,3 +426,33 @@ def macro_50_limit_up_trap(df: pd.DataFrame) -> pd.Series:
     big_drop = df['pct_change'] < -5.0
     yin = df['close'] < df['open']
     return lu_yest & big_drop & yin
+
+def macro_51_consecutive_loss(df: pd.DataFrame, n: int = 3) -> pd.Series:
+    """连续亏损。公司连续N年净利润为负。该条件基于年度净利润数据(net_profit)进行计算。
+    
+    注意：df 需要包含 'ts_code', 'year', 'net_profit' 列。
+    """
+    if 'net_profit' not in df.columns:
+        return pd.Series(False, index=df.index)
+    
+    annual = df[['ts_code', 'year', 'net_profit']].drop_duplicates().sort_values(['ts_code', 'year'])
+    annual['is_loss'] = annual['net_profit'] < 0
+    
+    def count_consecutive_loss(x):
+        if len(x) < n:
+            return pd.Series([False] * len(x), index=x.index)
+        consecutive = pd.Series(False, index=x.index)
+        current_streak = 0
+        for i in range(len(x) - 1, -1, -1):
+            if x.iloc[i]:
+                current_streak += 1
+                if current_streak >= n:
+                    consecutive.iloc[i] = True
+            else:
+                current_streak = 0
+        return consecutive
+    
+    annual['met'] = annual.groupby('ts_code')['is_loss'].apply(count_consecutive_loss).reset_index(level=0, drop=True)
+    
+    result = df.merge(annual[['ts_code', 'year', 'met']], on=['ts_code', 'year'], how='left')['met'].fillna(False)
+    return result
