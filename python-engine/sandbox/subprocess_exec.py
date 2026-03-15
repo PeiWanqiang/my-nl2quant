@@ -29,20 +29,45 @@ def execute_in_sandbox(code: str) -> list:
     
     conn = get_duckdb_conn()
     
-    # We only inject the necessary recent data to prevent OOM
-    # 6 months of data is usually enough for most macro calculations
+    # Simple query avoiding heavy joins that cause hangs
+    # Join only dimension to avoid Cartesian products
     query = """
-    SELECT * 
-    FROM v_fact_kline 
-    WHERE trade_date >= CURRENT_DATE - INTERVAL 180 DAY
-    ORDER BY ts_code, trade_date
+    WITH Kline AS (
+        SELECT * 
+        FROM v_fact_kline 
+        WHERE trade_date >= '2023-01-01'
+    )
+    SELECT k.*
+    FROM Kline k
+    ORDER BY k.ts_code, k.trade_date
     """
     
     try:
         logger.info("Loading recent data context for sandbox...")
         df = conn.execute(query).df()
+        
+        # Load finance data as a separate frame to avoid massive joins in DuckDB
+        # We can pass it into the sandbox if the LLM generated code needs it
+        finance_df = conn.execute("SELECT ts_code, report_date, net_profit FROM read_parquet('data/fact_finance/*.parquet') WHERE report_date >= '2022-01-01'").df()
+        
+        # We merge them in Pandas which is often safer/clearer for memory if sizes are reasonable
+        df['year'] = pd.to_datetime(df['trade_date']).dt.year
+        finance_df['year'] = pd.to_datetime(finance_df['report_date']).dt.year
+        
+        # Take the latest report per year per stock
+        finance_annual = finance_df.groupby(['ts_code', 'year'])['net_profit'].last().reset_index()
+        
+        # Merge into main df
+        df = pd.merge(df, finance_annual, on=['ts_code', 'year'], how='left')
+        
     except Exception as e:
-        raise ValueError(f"Failed to fetch context data: {e}")
+        logger.error(f"Failed to fetch context data: {e}")
+        # Fallback to extremely simple query without finance
+        try:
+             df = conn.execute("SELECT * FROM v_fact_kline WHERE trade_date >= CURRENT_DATE - INTERVAL 180 DAY ORDER BY ts_code, trade_date").df()
+             df['net_profit'] = 0 # Dummy to avoid crashes
+        except Exception as e2:
+             raise ValueError(f"Failed to fetch context data: {e2}")
 
     # Define the namespace
     restricted_globals = {

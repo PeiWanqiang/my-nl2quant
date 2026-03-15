@@ -89,10 +89,10 @@ CODE_GEN_PROMPT = """
 
 【执行环境与安全沙盒规范】：
 1. 预置导入：`import llm_agent.quant_macros as macros` 已经存在，你可以直接调用。
-2. 绝对闭包：你必须输出一个名为 `apply_strategy(df)` 的函数，接收 df，返回 df。绝不允许污染全局命名空间。
+2. 绝对闭包：你必须输出一个名为 `apply_strategy(df)` 的函数，接收 df，返回 None。必须使用全局变量 `final_codes` 来返回结果。
 3. 可用宏白名单：
 {macro_funcs_info}
-4. 逻辑组合：使用 Pandas 的按位逻辑符 `&` 或 `|` 组合多个条件的掩码 (Boolean Series)。
+4. 逻辑组合：使用 Pandas 的按位逻辑符 `&` 组合多个条件的掩码 (Boolean Series)。
 
 【标准代码输出模板】：
 ```python
@@ -105,11 +105,16 @@ def apply_strategy(df):
     # 条件2：基础 Pandas 向量化
     cond_2 = df['pe_ttm'] < 30
     
+    # 使用 & 组合多个条件
     final_mask = cond_1 & cond_2
     
     # 强制只返回最新一个交易日符合条件的股票，避免买入历史股票
     latest_date = df['trade_date'].max()
-    return df[final_mask & (df['trade_date'] == latest_date)]
+    result = df[final_mask & (df['trade_date'] == latest_date)]
+    
+    # 必须使用 global 声明并设置 final_codes
+    global final_codes
+    final_codes = result['ts_code'].tolist()
 
 条件列表：
 {conditions_json}
@@ -250,7 +255,8 @@ def negotiate_conditions(user_input: str, current_conditions: list) -> QuantChat
         )
         
         # 2. 如果已确认，执行代码生成 (JSON -> Code)
-        if result.interaction_state == "CONFIRMED" or "确认" in user_input:
+        # 只有当用户明确确认时（前端会发带有“确认”的字符串），才去执行耗时的代码生成逻辑
+        if "确认" in user_input:
             result.interaction_state = "CONFIRMED" # Force it if user says confirm
             code = _generate_code(result.extracted_conditions)
             result.executable_code = code
