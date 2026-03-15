@@ -11,6 +11,8 @@ class ExtractedCondition(BaseModel):
     id: str
     name: str
     description: str
+    # 👇 新增这一行：用于前端白盒渲染的带插槽字符串
+    ui_template: str = Field(default="", description="带有参数插槽的 UI 渲染模板，如 '连续 {n} 天上涨'")
     parameters: Dict[str, ConditionParameter]
 
 class QuantChatRequest(BaseModel):
